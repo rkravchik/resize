@@ -1,10 +1,14 @@
 package resize
 
 import (
+	"fmt"
 	"image"
 	"image/color"
+	"image/draw"
 	"runtime"
 	"testing"
+
+	xdraw "golang.org/x/image/draw"
 )
 
 var img = image.NewGray16(image.Rect(0, 0, 3, 3))
@@ -223,6 +227,139 @@ func Test_ResizeWithTranslucentColor(t *testing.T) {
 	_, g, _, _ := out.At(0, 0).RGBA()
 	if g != 0x00 {
 		t.Errorf("%+v", g)
+	}
+}
+
+func TestXDraw(t *testing.T)  {
+	inNRGBA := image.NewNRGBA(image.Rect(0, 0, 1, 2))
+	inNRGBA.Pix = []uint8{
+		0x00, 0xFF, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0xFF,
+	}
+	t.Run("GTBO", SubTestXDraw(inNRGBA))
+
+	inNRGBA = image.NewNRGBA(image.Rect(0, 0, 1, 2))
+	inNRGBA.Pix = []uint8{
+		0x00, 0xFF, 0x00, 0x00,
+		0xFF, 0x00, 0x00, 0xFF,
+	}
+	t.Run("GTRO", SubTestXDraw(inNRGBA))
+
+	inNRGBA = image.NewNRGBA(image.Rect(0, 0, 1, 2))
+	inNRGBA.Pix = []uint8{
+		0x00, 0xFF, 0x00, 0xFF,
+		0xFF, 0x00, 0x00, 0xFF,
+	}
+	t.Run("GORO", SubTestXDraw(inNRGBA))
+
+	inNRGBA = image.NewNRGBA(image.Rect(0, 0, 1, 2))
+	inNRGBA.Pix = []uint8{
+		0x00, 0xFF, 0x00, 0xFF,
+		0xFF, 0x00, 0x00, 0xF0,
+	}
+	t.Run("GORC", SubTestXDraw(inNRGBA))
+}
+
+func TestAlphaBleeding(t *testing.T)  {
+	inNRGBA := image.NewNRGBA(image.Rect(0, 0, 2, 2))
+	inNRGBA.Pix = []uint8{
+		0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF,
+		0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 0xFF,
+	}
+	t.Run("1", SubTestXDraw(inNRGBA))
+}
+
+func SubTestXDraw(inNRGBA *image.NRGBA) func(t *testing.T) {
+	return func(t *testing.T) {
+		fmt.Println("Origin NRGBA:")
+		PrintPix(inNRGBA)
+
+		inRGBA := image.NewRGBA(inNRGBA.Rect)
+		draw.Draw(inRGBA, inRGBA.Rect, inNRGBA, image.ZP, draw.Src)
+		fmt.Println("Origin RGBA:")
+		PrintPix(inRGBA)
+
+		onePixel := image.Rect(0, 0, 1, 1)
+
+		tt := []struct {
+			in     draw.Image
+			out    draw.Image
+			method interface{}
+		}{
+			{inNRGBA, image.NewNRGBA(onePixel), NearestNeighbor},
+			{inRGBA, image.NewRGBA(onePixel), NearestNeighbor},
+			{inNRGBA, image.NewNRGBA(onePixel), xdraw.NearestNeighbor},
+			{inRGBA, image.NewNRGBA(onePixel), xdraw.NearestNeighbor},
+			{inNRGBA, image.NewRGBA(onePixel), xdraw.NearestNeighbor},
+			{inRGBA, image.NewRGBA(onePixel), xdraw.NearestNeighbor},
+			{inNRGBA, image.NewNRGBA(onePixel), Bilinear},
+			{inRGBA, image.NewRGBA(onePixel), Bilinear},
+			{inNRGBA, image.NewNRGBA(onePixel), xdraw.BiLinear},
+			{inRGBA, image.NewNRGBA(onePixel), xdraw.BiLinear},
+			{inNRGBA, image.NewRGBA(onePixel), xdraw.BiLinear},
+			{inRGBA, image.NewRGBA(onePixel), xdraw.BiLinear},
+			{inNRGBA, image.NewNRGBA(onePixel), xdraw.ApproxBiLinear},
+			{inRGBA, image.NewNRGBA(onePixel), xdraw.ApproxBiLinear},
+			{inNRGBA, image.NewRGBA(onePixel), xdraw.ApproxBiLinear},
+			{inRGBA, image.NewRGBA(onePixel), xdraw.ApproxBiLinear},
+		}
+		for tc, item := range tt {
+			if interpolator, ok := item.method.(xdraw.Interpolator); ok {
+				interpolator.Scale(item.out, item.out.Bounds(), item.in, item.in.Bounds(), draw.Src, nil)
+				t.Logf("#%v In: %T, Out: %T, Interpolator: %T", tc+1, item.in, item.out, item.method)
+				t.Log(ShowPix(item.out))
+			}
+			if interpolator, ok := item.method.(InterpolationFunction); ok {
+				out := Resize(uint(item.out.Bounds().Dx()), uint(item.out.Bounds().Dy()), item.in, interpolator)
+				t.Logf("#%v In: %T, Out: %T, Interpolator: %v", tc+1, item.in, out, InterpolatorName(interpolator))
+				t.Log(ShowPix(out))
+			}
+		}
+	}
+}
+
+func InterpolatorName(intrp InterpolationFunction) string {
+	switch intrp {
+	case NearestNeighbor:
+		return "resize.nn"
+	case Bilinear:
+		return "resize.linear"
+	case Bicubic:
+		return "resize.cubic"
+	case MitchellNetravali:
+		return "resize.mn"
+	case Lanczos2:
+		return "resize.lanczos2"
+	case Lanczos3:
+		return "resize.lanczos3"
+	default:
+		return ""
+	}
+}
+
+func PrintPix(img image.Image) {
+	fmt.Print(ShowPix(img))
+}
+
+func ShowPix(img image.Image) string {
+	sprintf := func(pix []uint8, stride int, rect image.Rectangle) string {
+		var s string
+		for y := rect.Min.Y; y < rect.Max.Y; y++ {
+			row := pix[y*stride:]
+			for x := rect.Min.X; x < rect.Max.X; x++ {
+				s += fmt.Sprintf("% X; ", row[x*4:x*4+4])
+			}
+			s += "\n"
+		}
+		return s
+	}
+	switch img := img.(type) {
+	case *image.RGBA:
+		return sprintf(img.Pix, img.Stride, img.Rect)
+	case *image.NRGBA:
+		return sprintf(img.Pix, img.Stride, img.Rect)
+	default:
+		return ""
 	}
 }
 
